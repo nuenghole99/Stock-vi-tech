@@ -348,40 +348,53 @@ public:
       return true;
      }
 
-   //--- ปิดทุกไม้ + ลบ pending ทั้งหมดของ EA; คืนจำนวนที่ล้มเหลว
-   int               CloseAll(const string why)
+   //--- ปิด/ลบออเดอร์ของ EA เฉพาะชนิดเดียว (market หรือ pending); คืนจำนวนที่ล้มเหลว
+   //    การแจ้ง ORDER_CLOSE ของไม้ market ทำโดย OrderManager::TrackFills (มีกำไร/ขาดทุนครบ)
+   int               CloseKind(const bool market, const string why)
      {
       int tickets[];
       int n = 0;
-      // pass 1: pending ก่อน กันไม่ให้ fill ระหว่างปิด
-      for(int pass = 0; pass < 2; pass++)
+      for(int i = OrdersTotal() - 1; i >= 0; i--)
         {
-         ArrayResize(tickets, 0);
-         n = 0;
-         for(int i = OrdersTotal() - 1; i >= 0; i--)
+         if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+            continue;
+         if(!GG_IsOurs(m_cfg.magic, m_symbol))
+            continue;
+         if(GG_IsMarketType(OrderType()) != market)
+            continue;
+         ArrayResize(tickets, n + 1);
+         tickets[n++] = OrderTicket();
+        }
+      int failed = 0;
+      for(int k = 0; k < n; k++)
+        {
+         int err = 0;
+         if(GG_OrderCloseRetry(tickets[k], m_cfg.slippagePoints, m_cfg.maxRetries, m_cfg.dryRun, err))
            {
-            if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
-               continue;
-            if(!GG_IsOurs(m_cfg.magic, m_symbol))
-               continue;
-            bool isMarket = GG_IsMarketType(OrderType());
-            if((pass == 0 && isMarket) || (pass == 1 && !isMarket))
-               continue;
-            ArrayResize(tickets, n + 1);
-            tickets[n++] = OrderTicket();
+            if(!m_cfg.dryRun)
+               GG_Log("GUARD", (market ? "closed #" : "deleted pending #") + IntegerToString(tickets[k]) + " (" + why + ")");
            }
-         for(int k = 0; k < n; k++)
+         else
            {
-            int err = 0;
-            if(GG_OrderCloseRetry(tickets[k], m_cfg.slippagePoints, m_cfg.maxRetries, m_cfg.dryRun, err))
-              {
-               if(!m_cfg.dryRun)
-                  Notify(GG_EVT_ORDER_CLOSE, "#" + IntegerToString(tickets[k]) + " closed (" + why + ")");
-              }
-            else
-               Notify(GG_EVT_ERROR, "close #" + IntegerToString(tickets[k]) + " failed (" + why + "): " + GG_ErrText(err));
+            failed++;
+            Notify(GG_EVT_ERROR, (market ? "close #" : "delete #") + IntegerToString(tickets[k])
+                   + " failed (" + why + "): " + GG_ErrText(err));
            }
         }
+      return failed;
+     }
+
+   //--- ลบ pending ทั้งหมดของ EA (เช่นตอนปิด EA เพื่อไม่ให้มีไม้ fill ตอนไม่มี guard คุม)
+   int               DeletePendings(const string why)
+     {
+      return CloseKind(false, why);
+     }
+
+   //--- ปิดทุกไม้ + ลบ pending ทั้งหมดของ EA; คืนจำนวนที่ยังค้างอยู่
+   int               CloseAll(const string why)
+     {
+      CloseKind(false, why);   // pending ก่อน กันไม่ให้ fill ระหว่างปิด
+      CloseKind(true, why);
       int remaining = m_cfg.dryRun ? 0 : GG_CountAll(m_cfg.magic, m_symbol);
       if(remaining > 0)
          GG_Log("ERROR", "CloseAll(" + why + "): " + IntegerToString(remaining) + " order(s) still open, will retry");

@@ -7,7 +7,7 @@
 
 #include <stdlib.mqh>   // ErrorDescription()
 
-#define GG_VERSION            "0.1.0"
+#define GG_VERSION            "0.2.0"
 #define GG_NAME               "GoldGrid"
 
 // เฟสแรก: บังคับใช้บัญชี DEMO เท่านั้น (ไม่ใช่ input เพื่อกันเปิดโดยไม่ตั้งใจ)

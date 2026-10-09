@@ -19,6 +19,7 @@
 #include <GoldGrid/StateStore.mqh>
 #include <GoldGrid/GuardManager.mqh>
 #include <GoldGrid/Notifier.mqh>
+#include <GoldGrid/OrderManager.mqh>
 
 input int    TestMagic          = 999001;  // magic สำหรับไม้ทดสอบ
 input bool   RunScenarioTests   = true;    // false = รันเฉพาะ unit tests
@@ -39,14 +40,16 @@ input int    TestMaxSpread      = 1000;    // หลวมไว้ เพื่
 #define PH_ENFORCE_SL    3
 #define PH_EMERGENCY     4
 #define PH_RESTORE       5
-#define PH_LOSSCAP       6
-#define PH_WAIT_DAY      7
-#define PH_DONE          8
+#define PH_ORDERS        6
+#define PH_LOSSCAP       7
+#define PH_WAIT_DAY      8
+#define PH_DONE          9
 
 CNotifier     g_notifier;
 CStateStore   g_sState;
 CGuardManager g_guard;      // โหมดจริง (ในเทสเตอร์)
 CGuardManager g_guardDry;   // โหมด dry-run
+COrderManager g_orders;     // OrderManager โหมดจริง (ในเทสเตอร์)
 int           g_phase = PH_TRAIL_OPEN;
 bool          g_reported = false;
 double        g_lot = 0.01;
@@ -81,6 +84,18 @@ void MakeCfg(GuardConfig &c, const bool dryRun)
    c.slippagePoints        = 30;
    c.emergencyStop         = false;
    c.dryRun                = dryRun;
+  }
+
+void MakeOCfg(OrderConfig &o, const bool dryRun)
+  {
+   o.magic           = TestMagic;
+   o.lots            = g_lot;
+   o.gridPoints      = 300;
+   o.tpPoints        = 300;
+   o.repositionGrids = 3;
+   o.maxRetries      = 3;
+   o.slippagePoints  = 30;
+   o.dryRun          = dryRun;
   }
 
 // เปิดไม้ทดสอบโดยตรง (ไม่ใช่ OrderManager) slPts=0 = ไม่ใส่ SL
@@ -326,6 +341,31 @@ void Test_StateStore()
    TK_True("clear removes GVs", !GlobalVariableCheck(UNIT_PREFIX + "DayKey") && !GlobalVariableCheck(UNIT_PREFIX + "Halt"));
   }
 
+void Test_GridMath()
+  {
+   TK_Section("OrderManager: grid levels / TP");
+   TK_EqD("below 2001.50",            2001.00, COrderManager::GridLevelBelow(2001.50, 300, 0.01, 2, 1));
+   TK_EqD("below exactly on level",   1998.00, COrderManager::GridLevelBelow(2001.00, 300, 0.01, 2, 0));
+   TK_EqD("below respects min gap",   2001.00, COrderManager::GridLevelBelow(2001.02, 300, 0.01, 2, 1));
+   TK_EqD("below too close -> next",  1998.00, COrderManager::GridLevelBelow(2001.01, 300, 0.01, 2, 1));
+   TK_EqD("above 2001.50",            2004.00, COrderManager::GridLevelAbove(2001.50, 300, 0.01, 2, 1));
+   TK_EqD("above exactly on level",   2007.00, COrderManager::GridLevelAbove(2004.00, 300, 0.01, 2, 0));
+   TK_EqD("above near level",         2004.00, COrderManager::GridLevelAbove(2003.98, 300, 0.01, 2, 1));
+   TK_EqD("below 3-digit",            2001.300, COrderManager::GridLevelBelow(2001.500, 300, 0.001, 3, 1));
+   TK_EqD("TP buy limit",             2001.00, COrderManager::CalcTP(OP_BUYLIMIT, 1998.00, 300, 0.01, 2));
+   TK_EqD("TP sell limit",            2001.00, COrderManager::CalcTP(OP_SELLLIMIT, 2004.00, 300, 0.01, 2));
+   TK_EqD("TP disabled",              0,       COrderManager::CalcTP(OP_BUYLIMIT, 1998.00, 0, 0.01, 2));
+  }
+
+void Test_Notifier()
+  {
+   TK_Section("Notifier: JSON");
+   TK_True("escape quotes/backslash/newline", GG_JsonEscape("a\"b\\c\nd") == "a\\\"b\\\\c\\nd");
+   TK_True("telegram payload",
+           CNotifier::BuildTelegramJson("123", "hi \"x\"") == "{\"chat_id\":\"123\",\"text\":\"hi \\\"x\\\"\",\"disable_web_page_preview\":true}");
+   TK_True("INFO not sent to Telegram", !GG_EventToTelegram(GG_EVT_INFO) && GG_EventToTelegram(GG_EVT_LOSS_CAP));
+  }
+
 void RunUnitTests()
   {
    Test_DayHelpers();
@@ -335,6 +375,8 @@ void RunUnitTests()
    Test_InitialSL();
    Test_Trailing();
    Test_StateStore();
+   Test_GridMath();
+   Test_Notifier();
    Print("[TEST] unit tests done: pass=", g_tkPass, " fail=", g_tkFail);
   }
 
@@ -504,6 +546,100 @@ void Phase_Restore()
    TK_EqI("daily limit blocks", GG_BLOCK_DAILY_LIMIT, g_guard.CheckCanOpen(g_lot));
    g_guard.SetMaxTradesPerDay(GG_HARD_MAX_TRADES);
    TK_EqI("cleanup", 0, g_guard.CloseAll("test cleanup"));
+   g_phase = PH_ORDERS;
+  }
+
+bool T_OnGrid(const double price, const int gridPts)
+  {
+   double k = price / (gridPts * Point);
+   return MathAbs(k - MathRound(k)) < 1e-6;
+  }
+
+int T_FindPending(const int type)
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES) && OrderMagicNumber() == TestMagic
+         && OrderSymbol() == Symbol() && OrderType() == type)
+         return OrderTicket();
+   return -1;
+  }
+
+void Phase_Orders()
+  {
+   TK_Section("Scenario: OrderManager");
+   datetime now = TimeCurrent();
+   g_guard.CloseAll("test setup");
+   g_sState.StartNewDay(GG_DayKey(now), AccountEquity());
+   g_sState.Save();
+   OrderConfig o, od;
+   MakeOCfg(o, false);
+   MakeOCfg(od, true);
+   g_orders.Init(o, Symbol(), GetPointer(g_guard), GetPointer(g_notifier));
+
+   RefreshRates();
+   TK_EqI("places BUYLIMIT + SELLLIMIT", 2, g_orders.Manage());
+   TK_EqI("2 pendings exist", 2, GG_CountPending(TestMagic, Symbol()));
+   int types[2];
+   types[0] = OP_BUYLIMIT;
+   types[1] = OP_SELLLIMIT;
+   for(int i = 0; i < 2; i++)
+     {
+      int t = T_FindPending(types[i]);
+      string nm = (i == 0) ? "BUYLIMIT" : "SELLLIMIT";
+      if(t < 0 || !OrderSelect(t, SELECT_BY_TICKET))
+        {
+         TK_True(nm + " found", false);
+         continue;
+        }
+      double p = OrderOpenPrice();
+      TK_True(nm + " on grid level", T_OnGrid(p, o.gridPoints), "price=" + DoubleToString(p, Digits));
+      TK_True(nm + " limit side of price", i == 0 ? p < Ask : p > Bid);
+      TK_EqD(nm + " SL from guard", CGuardManager::CalcInitialSL(types[i], p, TestSLPoints, Point, Digits), OrderStopLoss(), Point * 0.5);
+      TK_EqD(nm + " TP", COrderManager::CalcTP(types[i], p, o.tpPoints, Point, Digits), OrderTakeProfit(), Point * 0.5);
+      TK_EqD(nm + " fixed lot", g_lot, OrderLots(), 1e-8);
+     }
+   TK_EqI("second Manage places nothing", 0, g_orders.Manage());
+   TK_EqI("still 2 pendings", 2, GG_CountPending(TestMagic, Symbol()));
+
+   COrderManager restarted;
+   restarted.Init(o, Symbol(), GetPointer(g_guard), GetPointer(g_notifier));
+   TK_EqI("after restart: no duplicate", 0, restarted.Manage());
+   TK_EqI("after restart: still 2", 2, GG_CountPending(TestMagic, Symbol()));
+
+   TK_EqI("DeletePendings fails none", 0, g_guard.DeletePendings("test"));
+   TK_EqI("DeletePendings removes all", 0, GG_CountPending(TestMagic, Symbol()));
+
+   g_guard.SetMaxTradesPerDay(1);
+   TK_EqI("daily limit 1 -> only 1 pending", 1, g_orders.Manage());
+   TK_EqI("pending count 1", 1, GG_CountPending(TestMagic, Symbol()));
+   g_guard.SetMaxTradesPerDay(GG_HARD_MAX_TRADES);
+   g_guard.CloseAll("test cleanup");
+
+   COrderManager dry;
+   dry.Init(od, Symbol(), GetPointer(g_guardDry), GetPointer(g_notifier));
+   dry.Manage();
+   TK_EqI("dry-run places nothing", 0, GG_CountPending(TestMagic, Symbol()));
+
+   // pending ที่อยู่ไกลเกิน RepositionGrids ระดับ -> ย้ายมาระดับเป้าหมาย (ไม่วางเพิ่ม)
+   int far = T_Open(OP_BUYLIMIT, TestSLPoints, 3000);
+   if(far >= 0)
+     {
+      RefreshRates();
+      int minGap = (int)MathMax(MarketInfo(Symbol(), MODE_STOPLEVEL), MarketInfo(Symbol(), MODE_FREEZELEVEL)) + 1;
+      double target = COrderManager::GridLevelBelow(Ask, o.gridPoints, Point, Digits, minGap);
+      g_orders.Manage();
+      TK_EqI("reposition keeps one BUYLIMIT", 1, GG_CountPending(TestMagic, Symbol()) - (T_FindPending(OP_SELLLIMIT) >= 0 ? 1 : 0));
+      if(OrderSelect(far, SELECT_BY_TICKET))
+        {
+         TK_EqD("far pending moved to target", target, OrderOpenPrice(), Point * 0.5);
+         TK_EqD("moved pending SL updated", CGuardManager::CalcInitialSL(OP_BUYLIMIT, target, TestSLPoints, Point, Digits),
+                OrderStopLoss(), Point * 0.5);
+        }
+     }
+   else
+      TK_True("open far pending", false);
+
+   TK_EqI("cleanup", 0, g_guard.CloseAll("test cleanup"));
    g_phase = PH_LOSSCAP;
   }
 
@@ -644,6 +780,7 @@ void OnTick()
       case PH_ENFORCE_SL: Phase_EnforceSL(); break;
       case PH_EMERGENCY:  Phase_Emergency(); break;
       case PH_RESTORE:    Phase_Restore();   break;
+      case PH_ORDERS:     Phase_Orders();    break;
       case PH_LOSSCAP:    Phase_LossCap();   break;
       case PH_WAIT_DAY:   Phase_WaitDay();   break;
      }

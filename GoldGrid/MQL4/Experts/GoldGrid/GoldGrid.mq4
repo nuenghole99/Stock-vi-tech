@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //| GoldGrid.mq4                                                     |
-//| Grid EA สองทางสำหรับ XAUUSD (Limit order) — เฟส 1: DEMO เท่านั้น      |
+//| Grid EA สองทางสำหรับ XAUUSD (Limit order) — เฟสนี้: DEMO เท่านั้น      |
 //|                                                                  |
-//| สถานะเฟส 1: Guard + StateStore ทำงานจริง, OrderManager ยังเป็น stub   |
+//| โมดูล: StateStore, GuardManager, OrderManager, Notifier          |
 //+------------------------------------------------------------------+
 #property copyright "GoldGrid"
-#property version   "0.10"
+#property version   "0.20"
 #property strict
 
 #include <GoldGrid/Common.mqh>
@@ -24,8 +24,11 @@ input bool     EmergencyStop       = false;   // true = ปิดทุกไม
 
 sinput string  InpSepTrading = "===== Trading =====";
 input double   LotSize             = 0.01;    // lot คงที่ต่อไม้ (ไม่มี martingale)
-input int      GridDistancePoints  = 300;     // ระยะห่างระหว่างไม้ (points) TODO: ปรับตามสเปรด/ATR
-input int      MaxTradesPerDay     = 5;       // ไม้สูงสุดต่อวันเซิร์ฟเวอร์ (1..5)
+input int      GridDistancePoints  = 300;     // ระยะกริด/ระดับราคาคงที่ (points) TODO: ปรับตามสเปรด/ATR
+input int      TakeProfitPoints    = 300;     // TP (points) 0 = ไม่ตั้ง TP ใช้ trailing อย่างเดียว
+input int      RepositionGrids     = 3;       // ย้าย pending เมื่อห่างระดับเป้าหมายเกินกี่ระดับ (ไม่ไล่ราคา)
+input int      MaxTradesPerDay     = 5;       // ไม้สูงสุดต่อวันเซิร์ฟเวอร์ (1..5) นับ pending ที่ค้างด้วย
+input bool     DeletePendingsOnExit = true;   // ลบ pending ตอนปิด EA/MT4 (กันไม้ fill ตอนไม่มี guard)
 
 sinput string  InpSepGuard = "===== Guard =====";
 input int      SLPoints            = 500;     // SL ฝั่งโบรกเกอร์ทุกออเดอร์ (points) TODO: ทดสอบค่า
@@ -42,12 +45,14 @@ sinput string  InpSepExec = "===== Execution =====";
 input int      MaxRetries          = 3;       // จำนวนครั้ง retry เมื่อเจอ requote/busy ฯลฯ
 input int      SlippagePoints      = 30;      // slippage ตอนปิดไม้ (points)
 
-sinput string  InpSepNotify = "===== Notify (phase 3) =====";
+sinput string  InpSepNotify = "===== Notify =====";
 input bool     TelegramEnabled     = false;   // เปิดแจ้งเตือน Telegram
-input string   TelegramBotToken    = "";      // Bot token (ห้ามฮาร์ดโค้ดในโค้ด)
+input string   TelegramBotToken    = "";      // Bot token จาก @BotFather (ห้ามฮาร์ดโค้ดในโค้ด)
 input string   TelegramChatId      = "";      // Chat id ปลายทาง
-input string   StatusURL           = "";      // URL รับ JSON สถานะ (เว้นว่าง = ไม่ส่ง)
+input string   StatusURL           = "";      // URL รับ JSON สถานะ (POST) เว้นว่าง = ไม่ส่ง
+input string   StatusAuthToken     = "";      // ส่งเป็น Authorization: Bearer ... (เว้นว่าง = ไม่ส่ง)
 input int      StatusIntervalSec   = 10;      // ส่งสถานะทุกกี่วินาที
+input int      HttpTimeoutMs       = 3000;    // timeout ของ WebRequest (ms)
 
 //==================================================================
 // GLOBALS
@@ -57,6 +62,7 @@ CGuardManager  g_guard;
 COrderManager  g_orders;
 CNotifier      g_notifier;
 bool           g_initOk = false;
+datetime       g_lastStatus = 0;
 
 //+------------------------------------------------------------------+
 bool ValidateInputs(string &why)
@@ -74,13 +80,23 @@ bool ValidateInputs(string &why)
    if(MaxSpreadPoints <= 0)                               { why = "MaxSpreadPoints must be > 0"; return false; }
    if(MinMarginLevelPct < 0)                              { why = "MinMarginLevelPct must be >= 0"; return false; }
    if(GridDistancePoints <= 0)                            { why = "GridDistancePoints must be > 0"; return false; }
+   if(TakeProfitPoints < 0)                               { why = "TakeProfitPoints must be >= 0"; return false; }
+   if(RepositionGrids < 1)                                { why = "RepositionGrids must be >= 1"; return false; }
    if(MaxRetries < 1 || MaxRetries > 10)                  { why = "MaxRetries must be 1..10"; return false; }
    if(StatusIntervalSec < 1)                              { why = "StatusIntervalSec must be >= 1"; return false; }
+   if(HttpTimeoutMs < 500 || HttpTimeoutMs > 10000)       { why = "HttpTimeoutMs must be 500..10000"; return false; }
+   if(TelegramEnabled && (TelegramBotToken == "" || TelegramChatId == ""))
+                                                          { why = "TelegramEnabled needs TelegramBotToken and TelegramChatId"; return false; }
 
    double minLot = MarketInfo(Symbol(), MODE_MINLOT);
    double maxLot = MarketInfo(Symbol(), MODE_MAXLOT);
    if(minLot > 0 && (LotSize < minLot || LotSize > maxLot))
      { why = StringFormat("LotSize %.2f outside broker range %.2f..%.2f", LotSize, minLot, maxLot); return false; }
+
+   int stopLevel = (int)MarketInfo(Symbol(), MODE_STOPLEVEL);
+   if(SLPoints <= stopLevel)                              { why = "SLPoints must be > broker stop level " + IntegerToString(stopLevel); return false; }
+   if(TakeProfitPoints > 0 && TakeProfitPoints <= stopLevel)
+                                                          { why = "TakeProfitPoints must be > broker stop level " + IntegerToString(stopLevel); return false; }
    return true;
   }
 
@@ -90,7 +106,7 @@ int OnInit()
    g_initOk = false;
    if(GG_DEMO_ONLY && !IsTesting() && !IsDemo())
      {
-      Alert(GG_NAME, ": phase 1 runs on DEMO accounts only. EA disabled.");
+      Alert(GG_NAME, ": this build runs on DEMO accounts only. EA disabled.");
       return INIT_FAILED;
      }
    string why = "";
@@ -100,7 +116,8 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
      }
 
-   g_notifier.Init(TelegramEnabled, TelegramBotToken, TelegramChatId, StatusURL);
+   string tag = GG_NAME + " " + Symbol() + (IsDemo() ? " DEMO" : " REAL") + (DryRun ? " DRY" : "");
+   g_notifier.Init(TelegramEnabled, TelegramBotToken, TelegramChatId, StatusURL, StatusAuthToken, tag, HttpTimeoutMs);
 
    //--- กู้สถานะ: GlobalVariables + สแกนออเดอร์ magic นี้ (ไม่วางซ้ำ)
    datetime now = TimeCurrent();
@@ -129,9 +146,20 @@ int OnInit()
    cfg.dryRun                = DryRun;
    g_guard.Init(cfg, Symbol(), GetPointer(g_state), GetPointer(g_notifier));
 
-   g_notifier.Event(GG_EVT_START, StringFormat("%s v%s started on %s %s | DryRun=%s | state %s: %s | open=%d pending=%d",
-                    GG_NAME, GG_VERSION, AccountCompany(), Symbol(), DryRun ? "Y" : "N", rsText,
-                    g_state.ToString(), GG_CountMarket(MagicNumber, Symbol()), GG_CountPending(MagicNumber, Symbol())));
+   OrderConfig ocfg;
+   ocfg.magic           = MagicNumber;
+   ocfg.lots            = LotSize;
+   ocfg.gridPoints      = GridDistancePoints;
+   ocfg.tpPoints        = TakeProfitPoints;
+   ocfg.repositionGrids = RepositionGrids;
+   ocfg.maxRetries      = MaxRetries;
+   ocfg.slippagePoints  = SlippagePoints;
+   ocfg.dryRun          = DryRun;
+   g_orders.Init(ocfg, Symbol(), GetPointer(g_guard), GetPointer(g_notifier));
+
+   g_notifier.Event(GG_EVT_START, StringFormat("v%s started on %s | state %s: %s | open=%d pending=%d | equity=%.2f",
+                    GG_VERSION, AccountCompany(), rsText, g_state.ToString(),
+                    GG_CountMarket(MagicNumber, Symbol()), GG_CountPending(MagicNumber, Symbol()), AccountEquity()));
 
    EventSetTimer(1);   // ทำงานต่อแม้ไม่มี tick (หมายเหตุ: MT4 tester ไม่เรียก OnTimer)
    g_initOk = true;
@@ -145,8 +173,13 @@ void OnDeinit(const int reason)
    EventKillTimer();
    if(g_initOk)
      {
+      // กันไม้ใหม่ fill ตอนที่ EA ไม่ได้รัน (ไม้ที่เปิดอยู่ยังมี SL ฝั่งโบรก)
+      if(DeletePendingsOnExit && !IsTesting())
+         g_guard.DeletePendings("EA stopped, reason=" + IntegerToString(reason));
       g_state.Save();
-      g_notifier.Event(GG_EVT_STOP, "deinit reason=" + IntegerToString(reason) + " | " + g_state.ToString());
+      g_notifier.Event(GG_EVT_STOP, "deinit reason=" + IntegerToString(reason) + " | " + g_state.ToString()
+                       + " | open=" + IntegerToString(GG_CountMarket(MagicNumber, Symbol()))
+                       + " pending=" + IntegerToString(GG_CountPending(MagicNumber, Symbol())));
      }
    Comment("");
   }
@@ -155,7 +188,8 @@ void OnTick()  { Process(); }
 void OnTimer() { Process(); }
 
 //+------------------------------------------------------------------+
-//| ลำดับงานต่อรอบ: ข้ามวัน -> emergency -> SL -> loss cap -> trail -> วางไม้ |
+//| ลำดับงานต่อรอบ:                                                     |
+//| ข้ามวัน -> แจ้ง fill/close -> emergency -> SL -> loss cap -> trail -> วางไม้ |
 //+------------------------------------------------------------------+
 void Process()
   {
@@ -166,9 +200,11 @@ void Process()
    if(g_state.RollDayIfNeeded(now, AccountEquity()))
       g_notifier.Event(GG_EVT_NEW_DAY, "new server day: " + g_state.ToString());
 
+   g_orders.TrackFills();
+
    if(g_guard.HandleEmergency())
      {
-      UpdateComment();
+      Finish(now);
       return;
      }
 
@@ -177,23 +213,57 @@ void Process()
 
    if(g_guard.CheckLossCap(now))
      {
-      UpdateComment();
+      Finish(now);
       return;
      }
 
    g_guard.ManageTrailing();
+   g_guard.CheckCanOpen(LotSize);       // อัปเดตสถานะ guard สำหรับ dashboard
+   g_orders.Manage();                   // เช็ก guard อีกครั้งก่อนวางทุกไม้
 
-   int reason = g_guard.CheckCanOpen(LotSize);
-   if(reason == GG_OK)
-      g_orders.OnTick(reason);
+   Finish(now);
+  }
 
+void Finish(const datetime now)
+  {
    UpdateComment();
+   if(StatusURL != "" && !IsTesting() && (int)(TimeLocal() - g_lastStatus) >= StatusIntervalSec)
+     {
+      g_lastStatus = TimeLocal();
+      g_notifier.PushStatus(BuildStatusJson(now));
+     }
+  }
+
+string BuildStatusJson(const datetime now)
+  {
+   string s = "{";
+   s += "\"ea\":\"" + GG_NAME + "\",\"version\":\"" + GG_VERSION + "\"";
+   s += ",\"symbol\":\"" + GG_JsonEscape(Symbol()) + "\"";
+   s += ",\"server_time\":\"" + TimeToString(now, TIME_DATE | TIME_SECONDS) + "\"";
+   s += ",\"demo\":" + GG_JsonBool(IsDemo()) + ",\"dry_run\":" + GG_JsonBool(DryRun);
+   s += ",\"equity\":" + DoubleToString(AccountEquity(), 2);
+   s += ",\"balance\":" + DoubleToString(AccountBalance(), 2);
+   s += ",\"floating_pl\":" + DoubleToString(g_guard.LastFloating(), 2);
+   s += ",\"closed_today\":" + DoubleToString(g_guard.LastClosed(), 2);
+   s += ",\"day_start_equity\":" + DoubleToString(g_state.dayStartEquity, 2);
+   s += ",\"loss_cap\":" + DoubleToString(g_guard.LossCapMoney(), 2);
+   s += ",\"trades_today\":" + IntegerToString(g_state.tradesToday);
+   s += ",\"max_trades\":" + IntegerToString(MaxTradesPerDay);
+   s += ",\"open_count\":" + IntegerToString(GG_CountMarket(MagicNumber, Symbol()));
+   s += ",\"pending_count\":" + IntegerToString(GG_CountPending(MagicNumber, Symbol()));
+   s += ",\"spread\":" + DoubleToString(GG_SpreadPoints(Symbol()), 1);
+   s += ",\"guard\":\"" + GG_BlockText(g_guard.LastReason()) + "\"";
+   s += ",\"halted\":" + GG_JsonBool(g_state.dayHalted);
+   s += ",\"emergency\":" + GG_JsonBool(g_guard.IsEmergency());
+   s += "}";
+   return s;
   }
 
 void UpdateComment()
   {
    Comment(GG_NAME, " v", GG_VERSION, DryRun ? "  [DRY-RUN]" : "", "\n",
            g_state.ToString(), "\n",
-           g_guard.StatusLine());
+           g_guard.StatusLine(), "\n",
+           "open=", GG_CountMarket(MagicNumber, Symbol()), " pending=", GG_CountPending(MagicNumber, Symbol()));
   }
 //+------------------------------------------------------------------+

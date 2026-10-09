@@ -158,5 +158,84 @@ bool GG_OrderModifyRetry(const int ticket, const double sl, const double tp,
    return false;
   }
 
+//+------------------------------------------------------------------+
+//| ส่งออเดอร์ใหม่ (ใช้กับ pending order) คืน ticket, 0 = dry-run, -1 = ล้มเหลว |
+//+------------------------------------------------------------------+
+int GG_OrderSendRetry(const string symbol, const int type, const double lots, const double price,
+                      const double sl, const double tp, const int slippage, const int magic,
+                      const string comment, const int maxRetries, const bool dryRun, int &lastErr)
+  {
+   lastErr = 0;
+   int    digits = (int)MarketInfo(symbol, MODE_DIGITS);
+   double np  = NormalizeDouble(price, digits);
+   double nsl = NormalizeDouble(sl, digits);
+   double ntp = NormalizeDouble(tp, digits);
+   if(dryRun)
+      return 0;                                         // ผู้เรียกเป็นคน log (กัน log ซ้ำทุก tick)
+   int tries = MathMax(1, maxRetries);
+   for(int attempt = 0; attempt < tries; attempt++)
+     {
+      if(!GG_WaitTradeContext(5000))
+        {
+         lastErr = 146;
+         continue;
+        }
+      RefreshRates();
+      int t = OrderSend(symbol, type, lots, np, slippage, nsl, ntp, comment, magic, 0, clrNONE);
+      if(t > 0)
+         return t;
+      lastErr = GetLastError();
+      GG_Log("WARN", "OrderSend type=" + IntegerToString(type) + " @" + DoubleToString(np, digits)
+             + " attempt " + IntegerToString(attempt + 1) + "/" + IntegerToString(tries)
+             + " failed " + GG_ErrText(lastErr));
+      if(!GG_IsTransientError(lastErr))
+         return -1;
+      Sleep(200 * (attempt + 1));
+     }
+   return -1;
+  }
+
+//+------------------------------------------------------------------+
+//| ย้ายราคา pending order (พร้อม SL/TP ใหม่) โดยไม่ลบ/วางใหม่             |
+//+------------------------------------------------------------------+
+bool GG_PendingMoveRetry(const int ticket, const double price, const double sl, const double tp,
+                         const int maxRetries, const bool dryRun, int &lastErr)
+  {
+   lastErr = 0;
+   int tries = MathMax(1, maxRetries);
+   for(int attempt = 0; attempt < tries; attempt++)
+     {
+      if(!OrderSelect(ticket, SELECT_BY_TICKET) || OrderCloseTime() != 0 || GG_IsMarketType(OrderType()))
+        {
+         lastErr = 4108;                                // ไม่ใช่ pending ที่ยังค้างอยู่แล้ว
+         return false;
+        }
+      int digits = (int)MarketInfo(OrderSymbol(), MODE_DIGITS);
+      if(dryRun)
+        {
+         GG_Log("DRY", "would MOVE pending #" + IntegerToString(ticket) + " to " + DoubleToString(price, digits));
+         return true;
+        }
+      if(!GG_WaitTradeContext(5000))
+        {
+         lastErr = 146;
+         continue;
+        }
+      RefreshRates();
+      if(OrderModify(ticket, NormalizeDouble(price, digits), NormalizeDouble(sl, digits),
+                     NormalizeDouble(tp, digits), 0, clrNONE))
+         return true;
+      lastErr = GetLastError();
+      if(lastErr == 1)
+         return true;
+      GG_Log("WARN", "move pending #" + IntegerToString(ticket) + " attempt " + IntegerToString(attempt + 1)
+             + " failed " + GG_ErrText(lastErr));
+      if(!GG_IsTransientError(lastErr))
+         return false;
+      Sleep(200 * (attempt + 1));
+     }
+   return false;
+  }
+
 #endif // GOLDGRID_TRADEOPS_MQH
 //+------------------------------------------------------------------+
