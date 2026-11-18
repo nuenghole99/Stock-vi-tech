@@ -126,6 +126,45 @@
   .metric-value.up{color:var(--teal);}
   .metric-value.down{color:var(--rust);}
 
+  /* ── Monte Carlo ── */
+  .mc-tab{
+    background:var(--surface-2); border:1px solid var(--line); border-radius:3px;
+    color:var(--ink-dim); font-family:'Sarabun',sans-serif; font-size:13px; font-weight:600;
+    padding:7px 14px; cursor:pointer;
+  }
+  .mc-tab.active{ background:var(--gold); color:#14190f; border-color:var(--gold); }
+  .mc-grid{
+    display:grid; grid-template-columns:1fr 1fr; gap:12px;
+  }
+  @media(max-width:420px){ .mc-grid{ grid-template-columns:1fr; } }
+  .mc-field label{
+    display:block; font-size:11px; color:var(--ink-faint);
+    font-family:'IBM Plex Mono',monospace; margin-bottom:5px;
+  }
+  .mc-field input{
+    width:100%; background:var(--surface); border:1px solid var(--line); border-radius:3px;
+    color:var(--ink); font-family:'IBM Plex Mono',monospace; font-size:14px;
+    padding:8px 10px;
+  }
+  .mc-field input:focus{ outline:none; border-color:var(--gold-dim); }
+  .mc-hint{ display:block; font-size:11px; color:var(--ink-faint); margin-top:4px; line-height:1.4; }
+  .mc-stat-grid{
+    display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:4px;
+  }
+  @media(max-width:420px){ .mc-stat-grid{ grid-template-columns:1fr; } }
+  .mc-stat{
+    background:var(--surface); border:1px solid var(--line); border-radius:3px;
+    padding:12px 14px;
+  }
+  .mc-stat-label{ font-size:11px; color:var(--ink-faint); margin-bottom:4px; }
+  .mc-stat-value{ font-family:'IBM Plex Mono',monospace; font-size:16px; font-weight:700; }
+  .mc-stat-value.good{ color:var(--teal); }
+  .mc-stat-value.warn{ color:var(--gold); }
+  .mc-stat-value.bad { color:var(--rust); }
+  .mc-verdict-pass{ background:rgba(31,125,108,.1); border-left:3px solid var(--teal); }
+  .mc-verdict-warn{ background:rgba(169,124,47,.1); border-left:3px solid var(--gold); }
+  .mc-verdict-fail{ background:rgba(175,63,42,.1); border-left:3px solid var(--rust); }
+
   .disclaimer{
     margin-top:28px; padding:16px; border:1px solid var(--line); border-radius:4px;
     background:var(--surface); font-size:11.5px; color:var(--ink-faint); line-height:1.7;
@@ -298,9 +337,120 @@
     <div class="disclaimer">
       <strong>ข้อควรทราบ:</strong> การวิเคราะห์นี้สร้างจากการคำนวณตามกฎเทคนิคัลอัตโนมัติ (เส้นค่าเฉลี่ย EMA, ระยะห่างจากจุดสูงสุด/ต่ำสุด, แนวโน้มปริมาณซื้อขาย) ไม่ใช่การวิเคราะห์โดยมนุษย์หรือ AI ที่เข้าใจบริบทข่าว/ปัจจัยพื้นฐานของบริษัท และไม่ใช่คำแนะนำการลงทุน ราคาหุ้นผันผวนได้จากปัจจัยที่กฎเหล่านี้ไม่ครอบคลุม (ข่าว, earnings, เหตุการณ์เฉพาะบริษัท) ควรใช้ประกอบการตัดสินใจร่วมกับข้อมูลอื่นเสมอ "เข้าเกณฑ์พิจารณาซื้อ" ไม่ใช่สัญญาณให้ซื้อทันที ยังต้องดูจังหวะราคา/pattern จริงในกราฟด้านบนประกอบก่อนตัดสินใจเสมอ
     </div>
-    <p class="footer-note">ข้อมูลราคาอาจดีเลย์เล็กน้อยตามข้อจำกัดของแหล่งข้อมูลฟรี</p>
-  </div>
+  </div><!-- end resultArea -->
 </main>
+
+<!-- ═══════════════════════════════════════════════════════════
+     MONTE CARLO SIMULATOR — independent section
+     ════════════════════════════════════════════════════════ -->
+<section id="mcSection" style="max-width:680px;margin:40px auto 0;padding:0 20px 60px;">
+
+  <div class="section-title" style="margin-bottom:16px;">
+    🎲 Monte Carlo Simulator — ทดสอบความทนทานของระบบเทรด
+  </div>
+  <p style="font-size:13px;color:var(--ink-dim);line-height:1.7;margin-bottom:20px;">
+    ป้อนสถิติจาก Backtest แล้วระบบจะสุ่มลำดับเทรด <strong>5,000 รอบ</strong>
+    เพื่อดูว่าระบบจะ "แย่ที่สุดได้แค่ไหน" ในเชิงสถิติ
+    — ระบบที่ดีจะผ่าน worst-case ได้โดยไม่ล้างพอร์ต
+  </p>
+
+  <!-- Input tabs -->
+  <div style="display:flex;gap:8px;margin-bottom:16px;" id="mcTabRow">
+    <button class="mc-tab active" onclick="mcSetTab('param')" id="tabParam">📊 ใส่สถิติ</button>
+    <button class="mc-tab" onclick="mcSetTab('list')" id="tabList">📋 วางรายการเทรด (R)</button>
+  </div>
+
+  <!-- Tab: Parameter input -->
+  <div id="mcPanelParam">
+    <div class="mc-grid">
+      <div class="mc-field">
+        <label>Win Rate (%)</label>
+        <input type="number" id="mcWinRate" value="55" min="1" max="99" step="1">
+      </div>
+      <div class="mc-field">
+        <label>Avg Win (%)</label>
+        <input type="number" id="mcAvgWin" value="2.0" min="0.01" step="0.1">
+        <span class="mc-hint">กำไรต่อเทรดที่ชนะ เทียบกับทุน</span>
+      </div>
+      <div class="mc-field">
+        <label>Avg Loss (%)</label>
+        <input type="number" id="mcAvgLoss" value="1.0" min="0.01" step="0.1">
+        <span class="mc-hint">ขาดทุนต่อเทรดที่แพ้ เทียบกับทุน</span>
+      </div>
+      <div class="mc-field">
+        <label>จำนวนเทรดต่อปี</label>
+        <input type="number" id="mcTrades" value="200" min="10" step="10">
+      </div>
+      <div class="mc-field">
+        <label>ทุนเริ่มต้น ($)</label>
+        <input type="number" id="mcCapital" value="1000" min="100" step="100">
+      </div>
+      <div class="mc-field">
+        <label>เกณฑ์ Ruin (%)</label>
+        <input type="number" id="mcRuinPct" value="50" min="10" max="99" step="5">
+        <span class="mc-hint">ถือว่า "ล้มเหลว" เมื่อขาดทุนเกิน X% ของทุนเริ่มต้น</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab: Trade list (R-multiples) -->
+  <div id="mcPanelList" style="display:none;">
+    <p style="font-size:12px;color:var(--ink-faint);margin-bottom:8px;line-height:1.6;">
+      วางผล R-multiple ต่อเทรด หนึ่งค่าต่อบรรทัด<br>
+      เช่น <code>1.5</code> = กำไร 1.5R, <code>-1</code> = ขาดทุน 1R (1R = risk ต่อเทรด)<br>
+      หรือใส่เป็น % กำไร/ขาดทุนต่อเทรดได้เลย เช่น <code>2.1</code> หรือ <code>-1.0</code>
+    </p>
+    <textarea id="mcTradeList" rows="8" placeholder="1.5&#10;-1&#10;0.8&#10;-1&#10;2.2&#10;-1&#10;1.1&#10;..." style="width:100%;background:var(--surface);border:1px solid var(--line);border-radius:3px;color:var(--ink);font-family:'IBM Plex Mono',monospace;font-size:13px;padding:10px;resize:vertical;"></textarea>
+    <div class="mc-field" style="margin-top:12px;">
+      <label>ทุนเริ่มต้น ($)</label>
+      <input type="number" id="mcCapitalList" value="1000" min="100" step="100">
+    </div>
+    <div class="mc-field" style="margin-top:12px;">
+      <label>เกณฑ์ Ruin (%)</label>
+      <input type="number" id="mcRuinPctList" value="50" min="10" max="99" step="5">
+    </div>
+  </div>
+
+  <button id="mcRunBtn" onclick="runMonteCarlo()"
+    style="margin-top:20px;background:var(--gold);color:#14190f;border:none;border-radius:3px;
+    font-family:'Sarabun',sans-serif;font-weight:700;font-size:15px;padding:12px 28px;
+    cursor:pointer;width:100%;">▶ Run Monte Carlo (5,000 paths)</button>
+
+  <div id="mcResults" style="display:none;margin-top:28px;">
+
+    <!-- Equity fan chart -->
+    <div class="section-title" style="margin-bottom:12px;">📈 Equity Curve Fan (Percentile Bands)</div>
+    <p style="font-size:12px;color:var(--ink-faint);margin:-4px 0 10px;">
+      แต่ละสีแสดง <b>ช่วงผลลัพธ์จากการสุ่ม 5,000 รอบ</b>
+      — เส้นกลาง = Median, แถบสีอ่อน = worst 5% ถึง best 95%
+    </p>
+    <canvas id="mcEquityCanvas" height="260"
+      style="width:100%;border:1px solid var(--line);border-radius:4px;background:var(--surface);display:block;"></canvas>
+
+    <!-- Drawdown histogram -->
+    <div class="section-title" style="margin-top:24px;margin-bottom:12px;">📉 Max Drawdown Distribution</div>
+    <canvas id="mcDdCanvas" height="180"
+      style="width:100%;border:1px solid var(--line);border-radius:4px;background:var(--surface);display:block;"></canvas>
+
+    <!-- Return histogram -->
+    <div class="section-title" style="margin-top:24px;margin-bottom:12px;">📊 Final Return Distribution</div>
+    <canvas id="mcRetCanvas" height="180"
+      style="width:100%;border:1px solid var(--line);border-radius:4px;background:var(--surface);display:block;"></canvas>
+
+    <!-- Stats table -->
+    <div class="section-title" style="margin-top:24px;margin-bottom:12px;">🔢 สรุปสถิติ Monte Carlo</div>
+    <div id="mcStatsArea"></div>
+
+    <!-- Verdict -->
+    <div id="mcVerdict" style="margin-top:16px;border-radius:4px;padding:14px 16px;font-size:14px;line-height:1.7;"></div>
+
+    <p style="font-size:11px;color:var(--ink-faint);margin-top:16px;line-height:1.6;">
+      ⚠️ Monte Carlo อนุมานจากการสุ่มลำดับเทรดใหม่ — ไม่ได้สร้างราคาตลาดจำลอง
+      ตัวเลขที่ได้บอกว่า "ถ้า edge ของระบบคงที่ จะเกิดอะไรขึ้นในลำดับต่าง ๆ"
+      แต่ไม่ครอบคลุม regime change หรือ correlation ของตลาด
+    </p>
+  </div>
+</section>
 
 <script>
 const RECENTS_KEY = 'analyzer_recents_v1';
@@ -1041,6 +1191,322 @@ const savedFmpKey = localStorage.getItem(FMPKEY_KEY);
 if(savedFmpKey) document.getElementById('fmpKeyInput').value = savedFmpKey;
 renderTfButtons();
 renderRecents();
+
+/* ═══════════════════════════════════════════════════════════
+   MONTE CARLO ENGINE
+   ════════════════════════════════════════════════════════ */
+function mcSetTab(tab){
+  document.getElementById('mcPanelParam').style.display = tab==='param' ? '' : 'none';
+  document.getElementById('mcPanelList').style.display  = tab==='list'  ? '' : 'none';
+  document.getElementById('tabParam').classList.toggle('active', tab==='param');
+  document.getElementById('tabList').classList.toggle('active',  tab==='list');
+}
+
+function mcGetTrades(){
+  const listPanel = document.getElementById('mcPanelList').style.display !== 'none';
+  if(listPanel){
+    const raw = document.getElementById('mcTradeList').value.trim();
+    if(!raw){ alert('กรุณาวางรายการเทรดก่อน'); return null; }
+    const trades = raw.split(/[\n,]+/).map(s=>parseFloat(s.trim())).filter(v=>!isNaN(v));
+    if(trades.length < 10){ alert('ต้องมีอย่างน้อย 10 เทรด'); return null; }
+    return {
+      trades,
+      capital: parseFloat(document.getElementById('mcCapitalList').value) || 1000,
+      ruinPct: parseFloat(document.getElementById('mcRuinPctList').value) || 50,
+      mode: 'list'
+    };
+  } else {
+    const wr = parseFloat(document.getElementById('mcWinRate').value)/100;
+    const aw = parseFloat(document.getElementById('mcAvgWin').value)/100;
+    const al = parseFloat(document.getElementById('mcAvgLoss').value)/100;
+    const n  = parseInt(document.getElementById('mcTrades').value);
+    const capital = parseFloat(document.getElementById('mcCapital').value);
+    const ruinPct = parseFloat(document.getElementById('mcRuinPct').value);
+    if(wr<=0||wr>=1||aw<=0||al<=0||n<10){ alert('ค่าพารามิเตอร์ไม่ถูกต้อง'); return null; }
+    // generate trade array from params (synthetic)
+    const trades = [];
+    for(let i=0;i<n;i++) trades.push(Math.random()<wr ? aw*100 : -al*100);
+    return { trades, capital, ruinPct, mode:'param', wr, aw:aw*100, al:al*100, n };
+  }
+}
+
+function runMonteCarlo(){
+  const btn = document.getElementById('mcRunBtn');
+  btn.disabled = true; btn.textContent = '⏳ กำลังคำนวณ...';
+  setTimeout(()=>{
+    try{ _doMonteCarlo(); }
+    catch(e){ console.error(e); alert('เกิดข้อผิดพลาด: '+e.message); }
+    btn.disabled = false; btn.textContent = '▶ Run Monte Carlo (5,000 paths)';
+  }, 30);
+}
+
+function _doMonteCarlo(){
+  const cfg = mcGetTrades();
+  if(!cfg) return;
+  const { trades, capital, ruinPct } = cfg;
+  const N_SIM = 5000;
+  const ruinThreshold = capital * (1 - ruinPct/100);
+  const n = trades.length;
+
+  // percentile sample paths to draw (5,25,50,75,95)
+  const PCT_LINES = [5, 25, 50, 75, 95];
+  const allFinalRet = [];   // final return % for each sim
+  const allMaxDD    = [];   // max drawdown % for each sim
+  let ruinCount = 0;
+
+  // Store equity paths at sampled steps for fan chart
+  const STEPS = Math.min(n, 100);
+  const stepIdxs = Array.from({length:STEPS}, (_,i)=>Math.round(i*(n-1)/(STEPS-1)));
+  // For fan chart we only keep percentile paths — store all final values per step
+  const stepEquities = Array.from({length:STEPS}, ()=>[]); // [step][sim] = equity
+
+  for(let s=0;s<N_SIM;s++){
+    // Fisher-Yates shuffle of trades
+    const sim = trades.slice();
+    for(let i=sim.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [sim[i],sim[j]]=[sim[j],sim[i]];
+    }
+    let eq = capital, peak = capital, maxDD = 0;
+    let stepI = 0;
+    let ruined = false;
+    for(let t=0;t<n;t++){
+      eq *= (1 + sim[t]/100);
+      if(eq > peak) peak = eq;
+      const dd = (peak - eq) / peak * 100;
+      if(dd > maxDD) maxDD = dd;
+      if(eq <= ruinThreshold) ruined = true;
+      if(stepI < STEPS && t === stepIdxs[stepI]){
+        stepEquities[stepI].push(eq);
+        stepI++;
+      }
+    }
+    // fill remaining steps if loop ended early
+    while(stepI < STEPS){ stepEquities[stepI].push(eq); stepI++; }
+    allFinalRet.push((eq-capital)/capital*100);
+    allMaxDD.push(maxDD);
+    if(ruined) ruinCount++;
+  }
+
+  allFinalRet.sort((a,b)=>a-b);
+  allMaxDD.sort((a,b)=>a-b);
+
+  const pctIdx = p => Math.min(N_SIM-1, Math.floor(p/100*N_SIM));
+  const retP  = p => allFinalRet[pctIdx(p)];
+  const ddP   = p => allMaxDD[pctIdx(p)];
+  const mean  = arr => arr.reduce((a,b)=>a+b,0)/arr.length;
+
+  const stats = {
+    ret5:  retP(5),  ret25: retP(25), ret50: retP(50), ret75: retP(75), ret95: retP(95),
+    dd5:   ddP(5),   dd50:  ddP(50),  dd95:  ddP(95),
+    meanRet: mean(allFinalRet), meanDD: mean(allMaxDD),
+    ruinProb: ruinCount/N_SIM*100,
+    expVal: cfg.mode==='param' ? cfg.wr*cfg.aw - (1-cfg.wr)*cfg.al : null,
+  };
+
+  drawEquityFan(stepEquities, stepIdxs, capital, N_SIM);
+  drawHistogram('mcDdCanvas', allMaxDD, 'Max Drawdown (%)', '#af3f2a', 40);
+  drawHistogram('mcRetCanvas', allFinalRet, 'Final Return (%)', '#1f7d6c', 40);
+  renderMcStats(stats, capital, ruinPct);
+  document.getElementById('mcResults').style.display = '';
+  document.getElementById('mcResults').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function drawEquityFan(stepEquities, stepIdxs, capital, N_SIM){
+  const canvas = document.getElementById('mcEquityCanvas');
+  const dpr = window.devicePixelRatio||1;
+  const W = canvas.clientWidth||640, H = 260;
+  canvas.width = W*dpr; canvas.height = H*dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+
+  const PAD = {l:52,r:12,t:12,b:32};
+  const iW = W-PAD.l-PAD.r, iH = H-PAD.t-PAD.b;
+  const STEPS = stepEquities.length;
+
+  // compute percentile lines per step
+  const pcts = [5,25,50,75,95];
+  const lines = pcts.map(p=>{
+    return stepEquities.map(arr=>{
+      const sorted = arr.slice().sort((a,b)=>a-b);
+      return sorted[Math.min(arr.length-1,Math.floor(p/100*arr.length))];
+    });
+  });
+
+  const allVals = lines.flat();
+  const minV = Math.min(...allVals, capital*0.3);
+  const maxV = Math.max(...allVals);
+  const xScale = i => PAD.l + i/(STEPS-1)*iW;
+  const yScale = v => PAD.t + iH - (v-minV)/(maxV-minV)*iH;
+
+  // Dark/light aware background
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim()||'#fff';
+  ctx.fillRect(0,0,W,H);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.07)'; ctx.lineWidth=1;
+  for(let i=0;i<=4;i++){
+    const y = PAD.t + i/4*iH;
+    ctx.beginPath(); ctx.moveTo(PAD.l,y); ctx.lineTo(W-PAD.r,y); ctx.stroke();
+    const v = minV + (1-i/4)*(maxV-minV);
+    ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.font=`10px 'IBM Plex Mono',monospace`;
+    ctx.fillText('$'+Math.round(v).toLocaleString(), 2, y+4);
+  }
+
+  // Baseline (initial capital)
+  ctx.strokeStyle='rgba(0,0,0,0.15)'; ctx.setLineDash([4,3]); ctx.lineWidth=1;
+  const yBase = yScale(capital);
+  ctx.beginPath(); ctx.moveTo(PAD.l, yBase); ctx.lineTo(W-PAD.r, yBase); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Band fills: 5-95 (outer), 25-75 (inner)
+  const drawBand = (topLine, botLine, color)=>{
+    ctx.beginPath();
+    topLine.forEach((v,i)=>{ i===0?ctx.moveTo(xScale(i),yScale(v)):ctx.lineTo(xScale(i),yScale(v)); });
+    for(let i=botLine.length-1;i>=0;i--) ctx.lineTo(xScale(i), yScale(botLine[i]));
+    ctx.closePath();
+    ctx.fillStyle = color; ctx.fill();
+  };
+  drawBand(lines[4], lines[0], 'rgba(31,125,108,0.10)');  // 5-95
+  drawBand(lines[3], lines[1], 'rgba(31,125,108,0.18)');  // 25-75
+
+  // Percentile lines
+  const lineColors = ['#af3f2a','#c47a3a','#1f7d6c','#5a6fb0','#1f7d6c'];
+  const lineWidths = [1.5,1.5,2.5,1.5,1.5];
+  const lineDash   = [[4,4],[2,3],[],[2,3],[4,4]];
+  pcts.forEach((p,pi)=>{
+    ctx.beginPath(); ctx.strokeStyle=lineColors[pi];
+    ctx.lineWidth=lineWidths[pi]; ctx.setLineDash(lineDash[pi]);
+    lines[pi].forEach((v,i)=>{ i===0?ctx.moveTo(xScale(i),yScale(v)):ctx.lineTo(xScale(i),yScale(v)); });
+    ctx.stroke(); ctx.setLineDash([]);
+    // label at end
+    const lx = xScale(STEPS-1)+3, ly = yScale(lines[pi][STEPS-1]);
+    ctx.fillStyle=lineColors[pi]; ctx.font=`10px 'IBM Plex Mono',monospace`;
+    ctx.fillText(`P${p}`, lx, ly+4);
+  });
+
+  // X-axis labels
+  ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.font=`10px 'IBM Plex Mono',monospace`;
+  [0,0.25,0.5,0.75,1].forEach(f=>{
+    const idx = Math.round(f*(STEPS-1));
+    const trade = stepIdxs[idx]+1;
+    ctx.fillText(`T${trade}`, xScale(idx)-8, H-6);
+  });
+}
+
+function drawHistogram(canvasId, data, label, color, bins){
+  const canvas = document.getElementById(canvasId);
+  const dpr = window.devicePixelRatio||1;
+  const W = canvas.clientWidth||640, H = parseInt(canvas.height)||180;
+  canvas.width = W*dpr; canvas.height = H*dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr,dpr);
+
+  const PAD = {l:40,r:12,t:12,b:30};
+  const iW = W-PAD.l-PAD.r, iH = H-PAD.t-PAD.b;
+
+  const minV = data[0], maxV = data[data.length-1];
+  const range = maxV-minV || 1;
+  const counts = new Array(bins).fill(0);
+  data.forEach(v=>{ const b=Math.min(bins-1,Math.floor((v-minV)/range*bins)); counts[b]++; });
+  const maxCount = Math.max(...counts);
+
+  ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--surface').trim()||'#fff';
+  ctx.fillRect(0,0,W,H);
+
+  // grid
+  ctx.strokeStyle='rgba(0,0,0,0.07)'; ctx.lineWidth=1;
+  for(let i=0;i<=3;i++){
+    const y = PAD.t+i/3*iH;
+    ctx.beginPath(); ctx.moveTo(PAD.l,y); ctx.lineTo(W-PAD.r,y); ctx.stroke();
+  }
+
+  // bars
+  const bw = iW/bins;
+  counts.forEach((c,i)=>{
+    const h = c/maxCount*iH;
+    const x = PAD.l + i*bw + 1;
+    const y = PAD.t + iH - h;
+    ctx.fillStyle = color+'cc'; ctx.fillRect(x, y, bw-2, h);
+  });
+
+  // percentile markers (5,50,95)
+  [[5,'#af3f2a'],[50,'#20241d'],[95,'#1f7d6c']].forEach(([p,c])=>{
+    const v = data[Math.min(data.length-1,Math.floor(p/100*data.length))];
+    const x = PAD.l + (v-minV)/range*iW;
+    ctx.strokeStyle=c; ctx.lineWidth=1.5; ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(x,PAD.t); ctx.lineTo(x,PAD.t+iH); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle=c; ctx.font=`9px 'IBM Plex Mono',monospace`;
+    ctx.fillText(`P${p}`, x+2, PAD.t+10);
+  });
+
+  // X labels
+  ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.font=`10px 'IBM Plex Mono',monospace`;
+  [0,0.25,0.5,0.75,1].forEach(f=>{
+    const v = minV+f*range;
+    ctx.fillText(v.toFixed(1)+'%', PAD.l+f*iW-12, H-6);
+  });
+
+  // axis label
+  ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.font=`11px 'Sarabun',sans-serif`;
+  ctx.fillText(label, PAD.l, PAD.t-2);
+}
+
+function renderMcStats(s, capital, ruinPct){
+  const ruinClass = s.ruinProb < 5 ? 'good' : s.ruinProb < 20 ? 'warn' : 'bad';
+  const dd95Class = s.dd95 < 20 ? 'good' : s.dd95 < 40 ? 'warn' : 'bad';
+  const ret50Class = s.ret50 > 0 ? 'good' : 'bad';
+
+  const statItems = [
+    { label:`ผลตอบแทนมัธยฐาน (Median)`,       value: fmtPct(s.ret50), cls: ret50Class },
+    { label:`ผลตอบแทน Worst 5% (P5)`,          value: fmtPct(s.ret5),  cls: s.ret5>0?'good':'bad' },
+    { label:`ผลตอบแทน Best 95% (P95)`,         value: fmtPct(s.ret95), cls:'good' },
+    { label:`Max Drawdown มัธยฐาน`,            value: fmtPct(-s.dd50), cls: s.dd50<20?'good':'warn' },
+    { label:`Max Drawdown กรณีแย่สุด 5% (P95)`,value: fmtPct(-s.dd95), cls: dd95Class },
+    { label:`โอกาส Ruin (ขาดทุน >${ruinPct}%)`, value: fmtPct(s.ruinProb), cls: ruinClass },
+    { label:`ผลตอบแทนเฉลี่ย (Mean)`,           value: fmtPct(s.meanRet), cls: s.meanRet>0?'good':'bad' },
+    s.expVal !== null
+      ? { label:`Expected Value ต่อเทรด`,       value: fmtPct(s.expVal), cls: s.expVal>0?'good':'bad' }
+      : { label:`Max Drawdown เฉลี่ย`,          value: fmtPct(-s.meanDD), cls:'warn' },
+  ];
+
+  document.getElementById('mcStatsArea').innerHTML = `
+    <div class="mc-stat-grid">
+      ${statItems.map(it=>`
+        <div class="mc-stat">
+          <div class="mc-stat-label">${it.label}</div>
+          <div class="mc-stat-value ${it.cls}">${it.value}</div>
+        </div>`).join('')}
+    </div>`;
+
+  // Verdict
+  const vEl = document.getElementById('mcVerdict');
+  let vClass, vText;
+  if(s.ruinProb < 5 && s.dd95 < 30 && s.ret50 > 0){
+    vClass = 'mc-verdict-pass';
+    vText  = `✅ <strong>ระบบผ่านเกณฑ์ Monte Carlo</strong><br>
+      โอกาส Ruin ต่ำ (${s.ruinProb.toFixed(1)}%) — Max Drawdown กรณีแย่สุด ${s.dd95.toFixed(1)}% อยู่ในระดับที่บริหารจัดการได้
+      — Median return เป็นบวก (${s.ret50.toFixed(1)}%)<br>
+      <span style="font-size:12px;opacity:.8;">ขั้นต่อไป: Walk-Forward Test และ Stress Test หลายตลาด ก่อนใช้กับเงินจริง</span>`;
+  } else if(s.ruinProb < 20 && s.ret50 > 0){
+    vClass = 'mc-verdict-warn';
+    vText  = `⚠️ <strong>ระบบผ่านได้บางส่วน — ต้องปรับปรุง</strong><br>
+      Median return เป็นบวก แต่ความเสี่ยงยังสูง: โอกาส Ruin ${s.ruinProb.toFixed(1)}%
+      หรือ Max DD กรณีแย่สุด ${s.dd95.toFixed(1)}%<br>
+      แนะนำ: ลด position size หรือเพิ่ม stop loss เพื่อควบคุม drawdown ก่อน`;
+  } else {
+    vClass = 'mc-verdict-fail';
+    vText  = `❌ <strong>ระบบยังไม่ผ่านเกณฑ์ Monte Carlo</strong><br>
+      ${s.ruinProb >= 20 ? `โอกาส Ruin สูงถึง ${s.ruinProb.toFixed(1)}% ` : ''}
+      ${s.ret50 <= 0 ? `Median return ติดลบ (${s.ret50.toFixed(1)}%) ` : ''}
+      ${s.dd95 >= 30 ? `Max DD worst-case ${s.dd95.toFixed(1)}%` : ''}<br>
+      ระบบนี้ยังไม่ควรนำไปใช้จริง — ต้องกลับไปปรับ edge ของกลยุทธ์ก่อน`;
+  }
+  vEl.className = vClass; vEl.innerHTML = vText;
+}
+
+function fmtPct(v){ return (v>=0?'+':'')+v.toFixed(2)+'%'; }
 
 </script>
 
